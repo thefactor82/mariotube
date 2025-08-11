@@ -9,7 +9,10 @@ config_file = os.path.join(os.path.expanduser("~"), ".mariotube")
 pid_file = os.path.join(os.path.expanduser("~"), ".mariotube.pid")
 
 # Config iniziale
-config = {"exe_path": ""}
+config = {
+    "exe_path": "",
+    "output_dir": ""
+}
 current_process = None
 
 def load_config():
@@ -38,6 +41,21 @@ def set_executable():
         save_config()
         messagebox.showinfo("Impostazioni salvate", f"Eseguibile impostato:\n{file_path}")
 
+def set_output_dir():
+    folder_path = filedialog.askdirectory(
+        title="Seleziona cartella di output"
+    )
+    if folder_path:
+        config["output_dir"] = folder_path
+        save_config()
+        messagebox.showinfo("Impostazioni salvate", f"Cartella di output impostata:\n{folder_path}")
+
+def show_settings():
+    exe_info = config.get("exe_path", "") or "(non impostato)"
+    out_info = config.get("output_dir", "") or "(non impostata)"
+    msg = f"Eseguibile:\n{exe_info}\n\nCartella di output:\n{out_info}"
+    messagebox.showinfo("Impostazioni attuali", msg)
+
 def run_program():
     """Avvia yt-dlp con il parametro e salva il PID su file."""
     global current_process
@@ -49,96 +67,67 @@ def run_program():
         messagebox.showwarning("Parametro mancante", "Inserisci un parametro prima di continuare.")
         return
 
+    cmd = [config["exe_path"]]
+
+    # Se cartella di output impostata, aggiungo l'opzione -o
+    if config.get("output_dir"):
+        output_template = os.path.join(config["output_dir"], "%(title)s.%(ext)s")
+        cmd.extend(["-o", output_template])
+
+    cmd.append(param)
+
     try:
-        # Su Windows possiamo creare un new process group (opzionale)
         if os.name == "nt":
-            current_process = subprocess.Popen([config["exe_path"], param],
-                                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+            current_process = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
         else:
-            current_process = subprocess.Popen([config["exe_path"], param])
+            current_process = subprocess.Popen(cmd)
 
-        # Salvo il pid su file così anche un'altra istanza del launcher può trovarlo
-        try:
-            with open(pid_file, "w", encoding="utf-8") as f:
-                f.write(str(current_process.pid))
-        except Exception:
-            pass
+        with open(pid_file, "w", encoding="utf-8") as f:
+            f.write(str(current_process.pid))
 
-        messagebox.showinfo("Esecuzione", f"Avviato:\n{config['exe_path']} {param}\nPID: {current_process.pid}")
+        messagebox.showinfo("Esecuzione", f"Avviato:\n{' '.join(cmd)}\nPID: {current_process.pid}")
         update_buttons()
     except Exception as e:
         messagebox.showerror("Errore", f"Non riesco ad avviare il programma.\nDettagli: {e}")
 
 def stop_program():
-    """Termina il processo (preferibilmente l'albero di processi)."""
     global current_process
     pid = None
-
-    # Prima preferiamo il processo corrente se ancora attivo
     if current_process and current_process.poll() is None:
         pid = current_process.pid
-    else:
-        # Proviamo a leggere il pid salvato su file (se esiste)
-        if os.path.exists(pid_file):
-            try:
-                with open(pid_file, "r", encoding="utf-8") as f:
-                    pid_text = f.read().strip()
-                    if pid_text:
-                        pid = int(pid_text)
-            except Exception:
-                pid = None
+    elif os.path.exists(pid_file):
+        try:
+            with open(pid_file, "r", encoding="utf-8") as f:
+                pid_text = f.read().strip()
+                if pid_text:
+                    pid = int(pid_text)
+        except Exception:
+            pid = None
 
     if pid is not None:
         try:
-            # Uso taskkill per Windows: forza (/F) e termina albero (/T)
             res = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                                  capture_output=True, text=True)
             if res.returncode == 0:
                 messagebox.showinfo("STOP", f"Processo {pid} terminato con successo.")
             else:
-                # Se taskkill fallisce (es. PID non esiste), offro di killare per nome
                 ask = messagebox.askyesno("Processo non trovato",
-                                          f"Non sono riuscito a terminare il PID {pid} (potrebbe non esistere).\n"
-                                          "Vuoi terminare comunque TUTTI i processi 'yt-dlp.exe' attivi?")
+                                          f"PID {pid} non trovato.\nVuoi terminare tutti i processi 'yt-dlp.exe'?")
                 if ask:
-                    res2 = subprocess.run(["taskkill", "/F", "/IM", "yt-dlp.exe", "/T"],
-                                          capture_output=True, text=True)
-                    if res2.returncode == 0:
-                        messagebox.showinfo("STOP", "Tutti i processi 'yt-dlp.exe' terminati.")
-                    else:
-                        messagebox.showerror("Errore", f"Impossibile terminare i processi per nome.\n{res2.stderr}")
-                else:
-                    messagebox.showinfo("STOP", "Operazione annullata.")
+                    subprocess.run(["taskkill", "/F", "/IM", "yt-dlp.exe", "/T"])
         except FileNotFoundError:
-            # taskkill non trovato (non-Windows) -> fallback su terminate()
             if current_process and current_process.poll() is None:
-                try:
-                    current_process.terminate()
-                    current_process.wait(timeout=5)
-                    messagebox.showinfo("STOP", "Processo terminato.")
-                except Exception as e:
-                    messagebox.showerror("Errore", f"Impossibile terminare il processo:\n{e}")
+                current_process.terminate()
+                current_process.wait(timeout=5)
+                messagebox.showinfo("STOP", "Processo terminato.")
         except Exception as e:
             messagebox.showerror("Errore", f"Errore durante la terminazione:\n{e}")
     else:
-        # Nessun pid noto: offriamo di killare per nome (potrebbe essere l'unica opzione)
         ask_all = messagebox.askyesno("Nessun processo noto",
-                                      "Non trovo un processo avviato da questo launcher.\n"
-                                      "Vuoi terminare TUTTI i processi 'yt-dlp.exe' attivi?")
+                                      "Vuoi terminare tutti i processi 'yt-dlp.exe' attivi?")
         if ask_all:
-            try:
-                res2 = subprocess.run(["taskkill", "/F", "/IM", "yt-dlp.exe", "/T"],
-                                      capture_output=True, text=True)
-                if res2.returncode == 0:
-                    messagebox.showinfo("STOP", "Tutti i processi 'yt-dlp.exe' terminati.")
-                else:
-                    messagebox.showerror("Errore", f"Impossibile terminare i processi per nome.\n{res2.stderr}")
-            except Exception as e:
-                messagebox.showerror("Errore", f"Operazione fallita:\n{e}")
-        else:
-            messagebox.showinfo("STOP", "Operazione annullata.")
+            subprocess.run(["taskkill", "/F", "/IM", "yt-dlp.exe", "/T"])
 
-    # Pulizia
     current_process = None
     try:
         if os.path.exists(pid_file):
@@ -149,27 +138,24 @@ def stop_program():
     update_buttons()
 
 def update_buttons():
-    """Abilita/disabilita GO/STOP in base allo stato del processo."""
-    running = False
-    if current_process and current_process.poll() is None:
-        running = True
-
+    running = current_process and current_process.poll() is None
     button_go.config(state="normal" if not running else "disabled")
     button_stop.config(state="normal" if running else "disabled")
-
-    # richiamo periodico
     root.after(500, update_buttons)
 
-# Carica configurazione e costruisci UI
+# Avvio
 load_config()
 
 root = tk.Tk()
 root.title("MarioTube Launcher")
-root.geometry("480x180")
+root.geometry("500x200")
 
 menubar = tk.Menu(root)
 settings_menu = tk.Menu(menubar, tearoff=0)
 settings_menu.add_command(label="Imposta eseguibile", command=set_executable)
+settings_menu.add_command(label="Imposta cartella di output", command=set_output_dir)
+settings_menu.add_separator()
+settings_menu.add_command(label="Visualizza impostazioni attuali", command=show_settings)
 menubar.add_cascade(label="Impostazioni", menu=settings_menu)
 root.config(menu=menubar)
 
@@ -190,7 +176,5 @@ button_stop = tk.Button(button_frame, text="STOP", command=stop_program,
                         bg="red", fg="white", font=("Arial", 12, "bold"))
 button_stop.pack(side="left", padx=5)
 
-# Avvio loop di update bottoni
 update_buttons()
-
 root.mainloop()
