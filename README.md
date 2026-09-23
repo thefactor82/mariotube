@@ -1,8 +1,10 @@
 # mariotube
 Program to simplify yt-dlp usage.
 
-On startup it checks for yt-dlp and ffmpeg presence in the .mariotube folder inside the personal user folder, and updates yt-dlp to the latest version if available.
+On startup it checks for yt-dlp, ffmpeg and deno presence in the .mariotube folder inside the personal user folder, and updates yt-dlp to the latest version if available.
 Also asks the first time for an output folder (can be changed later using the dropdown menu).
+
+Note: deno is used by yt-dlp as a JavaScript runtime to pass YouTube's anti-bot checks (without it YouTube videos may result in "This video is not available").
 
 ## Features
 The only options are:

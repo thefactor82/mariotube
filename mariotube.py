@@ -21,10 +21,13 @@ if not os.path.exists(BIN_DIR):
 CONFIG_FILE = os.path.join(BIN_DIR, "config.json")
 FFMPEG_BIN = os.path.join(BIN_DIR, "ffmpeg.exe")
 YTDLP_BIN = os.path.join(BIN_DIR, "yt-dlp.exe")
+DENO_BIN = os.path.join(BIN_DIR, "deno.exe")
+DENO_URL = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"
 config = {
     "output_folder": "",
     "ffmpeg_path": FFMPEG_BIN,
     "yt_dlp_path": YTDLP_BIN,
+    "deno_path": DENO_BIN,
 }
 current_processes = []
 
@@ -70,6 +73,9 @@ def is_ffmpeg_present():
 
 def is_ytdlp_present():
     return os.path.isfile(YTDLP_BIN)
+
+def is_deno_present():
+    return os.path.isfile(DENO_BIN)
 
 YOUTUBE_HOSTS = {
     "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
@@ -202,12 +208,27 @@ def download_ytdlp(popup, progress_var):
     config["yt_dlp_path"] = YTDLP_BIN
     save_config()
 
+def download_deno(popup, progress_var):
+    tmp_zip = os.path.join(tempfile.gettempdir(), "deno.zip")
+    download_with_progress(DENO_URL, tmp_zip, popup, progress_var)
+    with zipfile.ZipFile(tmp_zip, 'r') as z:
+        for m in z.namelist():
+            if m.lower().endswith("deno.exe"):
+                with z.open(m) as src, open(DENO_BIN, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                break
+    os.remove(tmp_zip)
+    config["deno_path"] = DENO_BIN
+    save_config()
+
 def ensure_binaries(root):
     missing = []
     if not is_ffmpeg_present():
         missing.append("ffmpeg")
     if not is_ytdlp_present():
         missing.append("yt-dlp")
+    if not is_deno_present():
+        missing.append("deno")
     if not missing:
         return
 
@@ -224,6 +245,8 @@ def ensure_binaries(root):
                 download_ffmpeg(popup, progress_var)
             if "yt-dlp" in missing:
                 download_ytdlp(popup, progress_var)
+            if "deno" in missing:
+                download_deno(popup, progress_var)
             popup.after(0, popup.destroy)
             root.after(0, lambda: messagebox.showinfo("Download", "Download completato e pronto all'uso."))
         except Exception as e:
@@ -265,6 +288,7 @@ def run_program():
     yt_dlp_cmd = [
         YTDLP_BIN,
         "--no-playlist",
+        "--js-runtimes", f"deno:{DENO_BIN}",
         "-f", "bestvideo+bestaudio/best",
         "-o", output_template,
         url
@@ -503,7 +527,7 @@ def animate_spinner():
 update_go_button_state()
 set_buttons_state(False)  # Ensure buttons are enabled at startup
 
-version_label = tk.Label(root, text="Versione 0.2", anchor="se", fg="gray")
+version_label = tk.Label(root, text="Versione 0.2.1", anchor="se", fg="gray")
 version_label.place(relx=1.0, rely=1.0, anchor="se")
 
 root.mainloop()
