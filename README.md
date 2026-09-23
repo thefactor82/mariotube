@@ -1,14 +1,20 @@
 # mariotube
 Program to simplify yt-dlp usage.
 
-On startup it checks for yt-dlp and ffmpeg presence in the .mariotube folder inside the personal user folder.
+On startup it checks for yt-dlp and ffmpeg presence in the .mariotube folder inside the personal user folder, and updates yt-dlp to the latest version if available.
 Also asks the first time for an output folder (can be changed later using the dropdown menu).
 
 ## Features
 The only options are:
-- PLAYLIST COMPLETA: if checked it will download the entire playlist and not only the current video of the playlist
 - AUDIO: if checked it will extract the .MP3
 - VIDEO: if checked it will download the best video (with audio of course) available (will be merged using ffmpeg)
+
+The URL field is "smart": dirty URLs (extra params, playlists, share links, short links) are cleaned automatically to the plain video URL.
+If the URL points to a playlist, only the first video is downloaded.
+Logs are written daily to `~/.mariotube/mariotube.log` (previous day's log is discarded at startup) for troubleshooting.
+
+## Building with GitHub Actions
+Pushing a tag like `v1.0.0` triggers the workflow `.github/workflows/release.yml`, which builds the executable with PyInstaller and creates a GitHub release with `mariotube.exe` and `mariotube.zip` attached.
 
 ## Dev Requirements
 Python for Windows (Tkinter already installed)
@@ -24,8 +30,3 @@ Then, from inside the project folder:
 ```powershell
 pyinstaller --onefile --noconsole --icon=logo.ico mariotube.py
 ```
-
-
-## To Do - Reminder
-- I don't like very much the behaviour that opens a prompt everytime it needs to launch yt-dlp or ffmpeg. Maybe can be done better.
-- Also I'm not sure that logging to file works very well... Needs some testing done by my dad LOL.

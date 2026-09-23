@@ -2,14 +2,17 @@ import subprocess
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
 import os
+import re
 import json
 import threading
 import urllib.request
+import urllib.parse
 import zipfile
 import tempfile
 import shutil
 import signal
 import logging
+import datetime
 
 BIN_DIR = os.path.join(os.path.expanduser("~"), ".mariotube")
 if not os.path.exists(BIN_DIR):
@@ -22,17 +25,29 @@ config = {
     "output_folder": "",
     "ffmpeg_path": FFMPEG_BIN,
     "yt_dlp_path": YTDLP_BIN,
-    "logging_enabled": False
 }
 current_processes = []
 
 LOG_FILE = os.path.join(BIN_DIR, "mariotube.log")
-logging.basicConfig(
-    filename=LOG_FILE,
-    filemode="a",
-    format="%(asctime)s %(levelname)s: %(message)s",
-    level=logging.INFO
-)
+
+def setup_logging():
+    try:
+        if os.path.exists(LOG_FILE):
+            last_mod = datetime.date.fromtimestamp(os.path.getmtime(LOG_FILE))
+            if last_mod < datetime.date.today():
+                os.remove(LOG_FILE)
+    except Exception:
+        pass
+    logging.basicConfig(
+        filename=LOG_FILE,
+        filemode="a",
+        format="%(asctime)s %(levelname)s: %(message)s",
+        level=logging.INFO,
+        encoding="utf-8"
+    )
+
+setup_logging()
+logging.info("--- MarioTube avviato ---")
 
 def save_config():
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -55,6 +70,98 @@ def is_ffmpeg_present():
 
 def is_ytdlp_present():
     return os.path.isfile(YTDLP_BIN)
+
+YOUTUBE_HOSTS = {
+    "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+    "youtu.be", "www.youtu.be", "youtube-nocookie.com", "www.youtube-nocookie.com"
+}
+VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+def extract_youtube_video_id(url):
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return None
+    host = (parsed.hostname or "").lower()
+    if host in ("youtu.be", "www.youtu.be"):
+        candidate = parsed.path.lstrip("/").split("/")[0]
+        return candidate if VIDEO_ID_RE.match(candidate) else None
+    if host in YOUTUBE_HOSTS:
+        if parsed.path.rstrip("/") == "/watch":
+            ids = urllib.parse.parse_qs(parsed.query).get("v", [])
+            if ids and VIDEO_ID_RE.match(ids[0]):
+                return ids[0]
+        m = re.match(r"^/(?:embed|shorts|live|v)/([A-Za-z0-9_-]{11})", parsed.path)
+        if m:
+            return m.group(1)
+    return None
+
+def clean_url(raw):
+    url = re.sub(r"\s+", "", raw.strip())
+    if not url:
+        return ""
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
+        url = "https://" + url
+    video_id = extract_youtube_video_id(url)
+    if video_id:
+        cleaned = f"https://www.youtube.com/watch?v={video_id}"
+        if cleaned != url:
+            logging.info(f"URL ripulito: '{raw.strip()}' -> '{cleaned}'")
+        return cleaned
+    return url
+
+def get_installed_ytdlp_version():
+    try:
+        result = subprocess.run(
+            [YTDLP_BIN, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        return result.stdout.strip()
+    except Exception as e:
+        logging.error(f"Impossibile leggere la versione di yt-dlp: {e}")
+        return None
+
+def get_latest_ytdlp_version():
+    req = urllib.request.Request(
+        "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest",
+        headers={"User-Agent": "mariotube"}
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.load(resp)
+    return data.get("tag_name", "").lstrip("v")
+
+def update_ytdlp_if_needed():
+    if not is_ytdlp_present():
+        return
+    try:
+        latest = get_latest_ytdlp_version()
+        current = get_installed_ytdlp_version()
+        if not latest or not current:
+            return
+        if latest == current:
+            logging.info(f"yt-dlp aggiornato (versione {current})")
+            return
+        logging.info(f"Aggiornamento yt-dlp: {current} -> {latest}")
+        tmp_bin = YTDLP_BIN + ".new"
+        req = urllib.request.Request(
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
+            headers={"User-Agent": "mariotube"}
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp, open(tmp_bin, "wb") as out_file:
+            shutil.copyfileobj(resp, out_file)
+        os.replace(tmp_bin, YTDLP_BIN)
+        logging.info(f"yt-dlp aggiornato con successo alla versione {latest}")
+    except Exception as e:
+        logging.error(f"Aggiornamento yt-dlp fallito: {e}")
+        try:
+            if os.path.exists(YTDLP_BIN + ".new"):
+                os.remove(YTDLP_BIN + ".new")
+        except Exception:
+            pass
+
 
 def download_with_progress(url, dest_path, popup, progress_var):
     try:
@@ -133,18 +240,10 @@ def set_buttons_state(running):
         button_go.config(state="normal" if video_var.get() or audio_var.get() else "disabled")
         button_stop.config(state="disabled")
 
-def log_message(msg, level="info"):
-    if config.get("logging_enabled", False):
-        if level == "info":
-            logging.info(msg)
-        elif level == "error":
-            logging.error(msg)
-
 def log_subprocess_output(proc, prefix):
-    if config.get("logging_enabled", False):
-        out, _ = proc.communicate()
-        for line in out.splitlines():
-            log_message(f"{prefix}: {line.strip()}")
+    out, _ = proc.communicate()
+    for line in out.splitlines():
+        logging.info(f"{prefix}: {line.rstrip()}")
 
 def run_program():
     global current_processes
@@ -153,7 +252,7 @@ def run_program():
         messagebox.showwarning("Eseguibile mancante", "yt-dlp.exe non trovato.")
         set_buttons_state(False)
         return
-    url = entry.get().strip()
+    url = clean_url(entry.get())
     if not url:
         messagebox.showwarning("Parametro mancante", "Inserisci un URL.")
         set_buttons_state(False)
@@ -162,87 +261,111 @@ def run_program():
     env = os.environ.copy()
     env["PATH"] = BIN_DIR + os.pathsep + env.get("PATH", "")
 
-    playlist_opt = ["--no-playlist"] if not playlist_var.get() else []
     output_template = os.path.join(config.get("output_folder", ""), "%(title)s.%(ext)s")
     yt_dlp_cmd = [
         YTDLP_BIN,
-        *playlist_opt,
+        "--no-playlist",
         "-f", "bestvideo+bestaudio/best",
         "-o", output_template,
         url
     ]
+    logging.info(f"Comando yt-dlp: {' '.join(yt_dlp_cmd)}")
 
     def target():
         start_spinner()
         global current_processes
         out_folder = config.get("output_folder", "")
-        before_files = set(os.listdir(out_folder))
-        yt_proc = subprocess.Popen(
-            yt_dlp_cmd,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        current_processes.append(yt_proc)
-        log_subprocess_output(yt_proc, "yt-dlp")
-        yt_proc.wait()
-        current_processes.remove(yt_proc)
+        yt_proc = None
+        try:
+            before_files = set(os.listdir(out_folder))
+            yt_proc = subprocess.Popen(
+                yt_dlp_cmd,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            current_processes.append(yt_proc)
+            log_subprocess_output(yt_proc, "yt-dlp")
+            yt_proc.wait()
+        except Exception as e:
+            logging.exception("Errore durante il download yt-dlp")
+            root.after(0, lambda: messagebox.showerror("Errore", f"Download fallito:\n{e}"))
+            root.after(0, lambda: set_buttons_state(False))
+            root.after(0, stop_spinner)
+            return
+        finally:
+            if yt_proc and yt_proc in current_processes:
+                current_processes.remove(yt_proc)
+        if yt_proc.returncode != 0:
+            logging.error(f"yt-dlp terminato con codice {yt_proc.returncode}")
         after_files = set(os.listdir(out_folder))
         new_files = [os.path.join(out_folder, f) for f in (after_files - before_files) if os.path.isfile(os.path.join(out_folder, f))]
         if not new_files:
+            logging.error("Nessun file scaricato trovato nella cartella output")
             root.after(0, lambda: messagebox.showerror("Errore", "Nessun file scaricato trovato."))
             root.after(0, lambda: set_buttons_state(False))
             root.after(0, stop_spinner)
             return
         for downloaded_file in new_files:
-            if video_var.get():
-                mp4_file = os.path.splitext(downloaded_file)[0] + ".mp4"
-                ffmpeg_cmd = [
-                    FFMPEG_BIN,
-                    "-i", downloaded_file,
-                    "-c:v", "copy",
-                    "-c:a", "copy",
-                    mp4_file
-                ]
-                ffmpeg_proc = subprocess.Popen(
-                    ffmpeg_cmd,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True
-                )
-                current_processes.append(ffmpeg_proc)
-                log_subprocess_output(ffmpeg_proc, "ffmpeg")
-                ffmpeg_proc.wait()
-                current_processes.remove(ffmpeg_proc)
-            if audio_var.get():
-                mp3_file = os.path.splitext(downloaded_file)[0] + ".mp3"
-                ffmpeg_cmd = [
-                    FFMPEG_BIN,
-                    "-i", downloaded_file,
-                    "-q:a", "0",
-                    "-map", "a",
-                    mp3_file
-                ]
-                ffmpeg_proc = subprocess.Popen(
-                    ffmpeg_cmd,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True
-                )
-                current_processes.append(ffmpeg_proc)
-                log_subprocess_output(ffmpeg_proc, "ffmpeg")
-                ffmpeg_proc.wait()
-                current_processes.remove(ffmpeg_proc)
+            logging.info(f"Conversione file: {downloaded_file}")
             try:
+                if video_var.get():
+                    mp4_file = os.path.splitext(downloaded_file)[0] + ".mp4"
+                    ffmpeg_cmd = [
+                        FFMPEG_BIN,
+                        "-i", downloaded_file,
+                        "-c:v", "copy",
+                        "-c:a", "copy",
+                        "-y",
+                        mp4_file
+                    ]
+                    logging.info(f"Comando ffmpeg: {' '.join(ffmpeg_cmd)}")
+                    ffmpeg_proc = subprocess.Popen(
+                        ffmpeg_cmd,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True
+                    )
+                    current_processes.append(ffmpeg_proc)
+                    log_subprocess_output(ffmpeg_proc, "ffmpeg")
+                    ffmpeg_proc.wait()
+                    current_processes.remove(ffmpeg_proc)
+                if audio_var.get():
+                    mp3_file = os.path.splitext(downloaded_file)[0] + ".mp3"
+                    ffmpeg_cmd = [
+                        FFMPEG_BIN,
+                        "-i", downloaded_file,
+                        "-q:a", "0",
+                        "-map", "a",
+                        "-y",
+                        mp3_file
+                    ]
+                    logging.info(f"Comando ffmpeg: {' '.join(ffmpeg_cmd)}")
+                    ffmpeg_proc = subprocess.Popen(
+                        ffmpeg_cmd,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True
+                    )
+                    current_processes.append(ffmpeg_proc)
+                    log_subprocess_output(ffmpeg_proc, "ffmpeg")
+                    ffmpeg_proc.wait()
+                    current_processes.remove(ffmpeg_proc)
                 os.remove(downloaded_file)
-            except Exception:
-                pass
+                logging.info(f"File originale rimosso: {downloaded_file}")
+            except Exception as e:
+                logging.exception(f"Errore durante la conversione di {downloaded_file}")
+                try:
+                    os.remove(downloaded_file)
+                except Exception:
+                    pass
+        logging.info("Download e conversione completati")
         root.after(0, stop_spinner)
         root.after(0, lambda: messagebox.showinfo("Completato", "Download e conversione completati."))
         root.after(0, lambda: set_buttons_state(False))
@@ -323,6 +446,8 @@ def ask_output_folder_if_needed():
 
 ask_output_folder_if_needed()
 ensure_binaries(root)
+if is_ytdlp_present():
+    threading.Thread(target=update_ytdlp_if_needed, daemon=True).start()
 root.title("MarioTube Launcher")
 root.geometry("500x220")
 
@@ -338,10 +463,8 @@ entry.pack(pady=5)
 
 options_frame = tk.Frame(root)
 options_frame.pack(pady=5)
-playlist_var = tk.BooleanVar()
 audio_var = tk.BooleanVar()
 video_var = tk.BooleanVar(value=True)
-tk.Checkbutton(options_frame, text="PLAYLIST COMPLETA", variable=playlist_var).pack(side="left", padx=5)
 tk.Checkbutton(options_frame, text="AUDIO", variable=audio_var, command=update_go_button_state).pack(side="left", padx=5)
 tk.Checkbutton(options_frame, text="VIDEO", variable=video_var, command=update_go_button_state).pack(side="left", padx=5)
 
@@ -380,7 +503,7 @@ def animate_spinner():
 update_go_button_state()
 set_buttons_state(False)  # Ensure buttons are enabled at startup
 
-version_label = tk.Label(root, text="Versione 0.1", anchor="se", fg="gray")
+version_label = tk.Label(root, text="Versione 0.2", anchor="se", fg="gray")
 version_label.place(relx=1.0, rely=1.0, anchor="se")
 
 root.mainloop()

@@ -1,4 +1,4 @@
-build/*
-dist/*
-*.ico
-*.spec
+build/
+dist/
+__pycache__/
+*.pyc
